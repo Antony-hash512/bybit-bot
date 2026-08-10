@@ -257,9 +257,10 @@ async def main() -> None:
     )
 
     args = parser.parse_args()
-    config = load_config()
+    use_testnet_flag = True if args.testnet else None
+    config = load_config(use_testnet=use_testnet_flag)
 
-    testnet = args.testnet or config.testnet
+    testnet = config.testnet
     categories = [args.category] if args.category else config.categories
 
     if not config.api_key or not config.api_secret or config.api_secret == "your_api_secret_here":

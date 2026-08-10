@@ -25,25 +25,24 @@
 Создайте файл `.env` в корневой директории проекта:
 
 ```env
-# Bybit API Key
-BYBIT_API_KEY=ваш_api_key
+# Переключатель режимов (True - Testnet / False - Mainnet)
+USE_TESTNET=True
 
-# Режим работы (true - Testnet, false - Mainnet)
-BYBIT_TESTNET=false
+# Боевые ключи (Mainnet)
+BYBIT_API_KEY=ваш_mainnet_api_key
+BYBIT_BOT_NAME=имя_вашего_бота
+BYBIT_PRIVATE_KEY_PATH=private.pem
+
+# Тестовые ключи (Testnet)
+BYBIT_TESTNET_API_KEY=ваш_testnet_api_key
+BYBIT_TESTNET_BOT_NAME=имя_тестового_бота
+BYBIT_TESTNET_PRIVATE_KEY_PATH=private_testnet.pem
 
 # Торговые категории по умолчанию (через запятую)
 BYBIT_CATEGORIES=spot,linear
-
-# Вариант А (RSA PEM): Указать путь к файлу приватного ключа
-BYBIT_PRIVATE_KEY_PATH=private.pem
-
-# Вариант Б (HMAC или PEM файл/строка в BYBIT_API_SECRET):
-# BYBIT_API_SECRET=private.pem
-# или
-# BYBIT_API_SECRET=ваш_hmac_secret
 ```
 
-> 💡 **Автоопределение RSA**: Если файл `private.pem` находится в корне проекта, `config.py` автоматически применит RSA-авторизацию, даже если `BYBIT_PRIVATE_KEY_PATH` не задан явно.
+> 💡 **Автовыбор ключей**: В зависимости от `USE_TESTNET` (True/False), модуль `config.py` автоматически подтягивает соответствующие API-ключи, имя бота и путь к RSA PEM ключу.
 
 ---
 
