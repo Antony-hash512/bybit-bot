@@ -87,9 +87,9 @@ def test_check_and_trade_real_order():
     db = DatabaseManager(TEST_DB)
     # Exec: 0.1 BTC @ 50,000 = 5000.0 USDT
     # Avg price = 50,000
-    # SPREAD_PERCENT = 1.25% -> buy_price_wbtc = 50,000 * 0.9875 = 49,375.0 -> floor = 49375.00
+    # SPREAD_PERCENT = 1.25% -> buy_price_wbtc = 50,000 * 0.9875 = 49,375.0 -> floor(val * 10)/10 = 49375.0
     # SAVINGS_PERCENT = 0.25% -> safe_usdt = 5000 * 0.9975 = 4987.5
-    # raw_qty = 4987.5 / 49375 = 0.10101215... -> floor(qty * 100)/100 = 0.10
+    # raw_qty = 4987.5 / 49375 = 0.101012145... -> floor(val * 1e6)/1e6 = 0.101012
     db.insert_execution("exec_real", 0.1, 50000.0, 5000.0)
 
     mock_session = MagicMock()
@@ -104,8 +104,8 @@ def test_check_and_trade_real_order():
     assert kwargs["symbol"] == "WBTCUSDT"
     assert kwargs["side"] == "Buy"
     assert kwargs["orderType"] == "Limit"
-    assert kwargs["price"] == "49375.00"
-    assert kwargs["qty"] == "0.10"
+    assert kwargs["price"] == "49375.0"
+    assert kwargs["qty"] == "0.101012"
 
     # Status updated in DB
     pending = db.get_pending_executions()
