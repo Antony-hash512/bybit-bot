@@ -155,10 +155,27 @@ def test_check_and_trade_amend_existing_order():
     cleanup()
 
 
+def test_sync_offline_executions_disabled():
+    cleanup()
+    db = DatabaseManager(TEST_DB)
+    mock_session = MagicMock()
+    mock_config = MagicMock()
+    mock_config.sync_offline_history = False
+    mock_config.sync_hours = 24.0
+
+    from bot import sync_offline_executions
+    sync_offline_executions(mock_session, db, config=mock_config)
+
+    # get_executions should NOT be called when sync_offline_history is False
+    mock_session.get_executions.assert_not_called()
+    cleanup()
+
+
 if __name__ == "__main__":
     test_db_manager()
     test_check_and_trade_below_threshold()
     test_check_and_trade_above_threshold_dry_run()
     test_check_and_trade_real_order()
     test_check_and_trade_amend_existing_order()
+    test_sync_offline_executions_disabled()
     print("ALL TESTS PASSED SUCCESSFULLY!")

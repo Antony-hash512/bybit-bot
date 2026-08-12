@@ -287,12 +287,22 @@ def check_and_trade(
 
 def sync_offline_executions(session: HTTP, db: DatabaseManager, config: Config | None = None) -> None:
     """
-    Fetch BTCUSDT execution history for the last 24 hours via REST API before WS connection.
+    Fetch BTCUSDT execution history via REST API before WS connection.
+    If SYNC_OFFLINE_HISTORY is False, skips the REST sync phase.
     Filter Sell orders and insert new executions into DB as 'pending'.
     Triggers check_and_trade afterwards.
     """
-    logger.info("Starting offline REST execution sync for BTCUSDT (last 24 hours)...")
-    start_time_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
+    if config is None:
+        config = load_config()
+
+    if not config.sync_offline_history:
+        logger.info("Синхронизация оффлайн-сделок отключена в настройках (SYNC_OFFLINE_HISTORY=False). Пропуск оффлайн-синхронизации.")
+        check_and_trade(db, session, config=config)
+        return
+
+    sync_hours = config.sync_hours
+    logger.info(f"Starting offline REST execution sync for BTCUSDT (last {sync_hours:g} hours)...")
+    start_time_ms = int((datetime.now(timezone.utc) - timedelta(hours=sync_hours)).timestamp() * 1000)
     cursor = None
     new_count = 0
 
@@ -382,6 +392,7 @@ async def async_main():
     logger.info("Starting Bybit Reactive Hedge Bot")
     logger.info(f"DRY_RUN mode: {config.dry_run}")
     logger.info(f"Spread Percent: {config.spread_percent}% | Savings Percent: {config.savings_percent}%")
+    logger.info(f"Offline Sync Enabled: {config.sync_offline_history} | Sync Hours Window: {config.sync_hours:g}h")
     logger.info("=" * 60)
 
     if not config.api_key or not config.api_secret or config.api_secret == "your_api_secret_here":

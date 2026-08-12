@@ -24,6 +24,8 @@ class Config:
     dry_run: bool
     spread_percent: float
     savings_percent: float
+    sync_offline_history: bool
+    sync_hours: float
 
 
 def load_config(use_testnet: bool | None = None) -> Config:
@@ -105,6 +107,15 @@ def load_config(use_testnet: bool | None = None) -> Config:
         logger.warning("Invalid SAVINGS_PERCENT in .env, falling back to 0.25")
         savings_percent = 0.25
 
+    sync_offline_env = os.getenv("SYNC_OFFLINE_HISTORY", "true").strip().lower()
+    sync_offline_history = sync_offline_env in ("true", "1", "yes")
+
+    try:
+        sync_hours = float(os.getenv("SYNC_HOURS", "24").strip())
+    except ValueError:
+        logger.warning("Invalid SYNC_HOURS in .env, falling back to 24")
+        sync_hours = 24.0
+
     if not api_key:
         logger.warning(f"API key for {'testnet' if testnet else 'mainnet'} is missing or empty in .env file.")
 
@@ -123,4 +134,6 @@ def load_config(use_testnet: bool | None = None) -> Config:
         dry_run=dry_run,
         spread_percent=spread_percent,
         savings_percent=savings_percent,
+        sync_offline_history=sync_offline_history,
+        sync_hours=sync_hours,
     )
