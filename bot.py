@@ -318,7 +318,9 @@ async def async_main():
 
     logger.info(f"Operating Mode: {'TESTNET' if config.testnet else 'MAINNET'}")
 
-    db = DatabaseManager("hedge_bot.db")
+    db_filename = "hedge_bot_testnet.db" if config.testnet else "hedge_bot.db"
+    logger.info(f"Using database file: {db_filename}")
+    db = DatabaseManager(db_filename)
 
     session = HTTP(
         testnet=config.testnet,

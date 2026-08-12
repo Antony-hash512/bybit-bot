@@ -293,7 +293,7 @@ tail -f bot.log
 # Мониторинг ордеров на бирже через viewer.py
 uv run python viewer.py --watch --interval 3
 
-# Проверка последних 10 записей в локальной базе данных SQLite
+# Проверка последних 10 записей в базе SQLite (hedge_bot.db для Mainnet / hedge_bot_testnet.db для Testnet)
 sqlite3 hedge_bot.db "SELECT exec_id, exec_qty, exec_price, exec_value_usdt, status, created_at FROM executions ORDER BY created_at DESC LIMIT 10;"
 ```
 
