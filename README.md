@@ -158,27 +158,10 @@ uv sync
 
 ### 3. Конфигурация ключей авторизации
 
-Создайте или отредактируйте файл `.env`:
+Создайте или отредактируйте файл `.env` в корневой директории проекта (подробное описание и пример переменных см. в разделе [🔑 Авторизация и конфигурация](#-авторизация-и-конфигурация)):
 
 ```bash
 nano .env
-```
-
-Пример содержания `.env`:
-
-```env
-# Переключатель режимов (True - Testnet / False - Mainnet)
-USE_TESTNET=True
-
-# Ключи для реальной биржи (Mainnet)
-BYBIT_API_KEY=ваш_mainnet_api_key
-BYBIT_BOT_NAME=bot_mainnet
-BYBIT_PRIVATE_KEY_PATH=private.pem
-
-# Ключи для тестовой биржи (Testnet)
-BYBIT_TESTNET_API_KEY=ваш_testnet_api_key
-BYBIT_TESTNET_BOT_NAME=bot_testnet
-BYBIT_TESTNET_PRIVATE_KEY_PATH=private_testnet.pem
 ```
 
 Если вы используете **RSA PEM-ключи**:
