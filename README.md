@@ -27,6 +27,11 @@
 ```env
 # Переключатель режимов (True - Testnet / False - Mainnet)
 USE_TESTNET=True
+DRY_RUN=True
+
+# Математика ордеров (%)
+SPREAD_PERCENT=1.25
+SAVINGS_PERCENT=0.25
 
 # Боевые ключи (Mainnet)
 BYBIT_API_KEY=ваш_mainnet_api_key
@@ -42,7 +47,7 @@ BYBIT_TESTNET_PRIVATE_KEY_PATH=private_testnet.pem
 BYBIT_CATEGORIES=spot,linear
 ```
 
-> 💡 **Автовыбор ключей**: В зависимости от `USE_TESTNET` (True/False), модуль `config.py` автоматически подтягивает соответствующие API-ключи, имя бота и путь к RSA PEM ключу.
+> 💡 **Автовыбор ключей и настроек**: В зависимости от `USE_TESTNET` (True/False) и флагов `DRY_RUN`, `SPREAD_PERCENT`, `SAVINGS_PERCENT`, бот автоматически загружает ключи и торговую математику из `.env`.
 
 ---
 
@@ -180,26 +185,27 @@ chmod 600 private*.pem
 Для безопасной проверки работы бота без риска реальными средствами используйте режим **Testnet** + **DRY_RUN**.
 
 #### Этап 4.1: Безопасный прогон (Симуляция без отправки ордеров)
-1. В `.env` установите: `USE_TESTNET=True`.
-2. В файле `bot.py` убедитесь, что включен симуляционный режим:
-   ```python
-   DRY_RUN = True
+1. В `.env` установите:
+   ```env
+   USE_TESTNET=True
+   DRY_RUN=True
    ```
-3. Запустите бота:
+2. Запустите бота:
    ```bash
    uv run python bot.py
    ```
-4. **Что происходит**:
+3. **Что происходит**:
    - Бот считывает историю сделок за 24 часа через REST API.
    - Подключается к приватной сокет-сессии Testnet.
    - При накоплении сделок >= 6.0 USDT выводит в консоль красивый лог симуляции:
      `DRY_RUN: Выставил бы ордер Buy WBTCUSDT на сумму X по цене Y (Qty: Z)`
-   - Обновляет статусы в SQLite БД `hedge_bot.db`.
+   - Обновляет статусы в SQLite БД `hedge_bot_testnet.db`.
 
 #### Этап 4.2: Тестирование с реальным ордером в Testnet
-1. Откройте `bot.py` и установите:
-   ```python
-   DRY_RUN = False
+1. В файле `.env` установите:
+   ```env
+   USE_TESTNET=True
+   DRY_RUN=False
    ```
 2. Запустите бота: `uv run python bot.py`.
 3. Совершите продажу BTC на тестовом сайте [testnet.bybit.com](https://testnet.bybit.com).
@@ -209,15 +215,12 @@ chmod 600 private*.pem
 
 ### ⚡ 5. Запуск в "боевых условиях" (Mainnet / Реальная биржа)
 
-Перед запуском на реальном счете переключите конфигурацию:
+Перед запуском на реальном счете переключите конфигурацию в `.env`:
 
 1. **Конфигурация `.env`**:
    ```env
    USE_TESTNET=False
-   ```
-2. **Флаг в `bot.py`**:
-   ```python
-   DRY_RUN = False
+   DRY_RUN=False
    ```
 
 #### Способ А: Запуск как фоновая служба Systemd (Рекомендуется для 24/7 работы)

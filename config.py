@@ -21,6 +21,9 @@ class Config:
     rsa_authentication: bool
     testnet: bool
     categories: list[str]
+    dry_run: bool
+    spread_percent: float
+    savings_percent: float
 
 
 def load_config(use_testnet: bool | None = None) -> Config:
@@ -87,6 +90,21 @@ def load_config(use_testnet: bool | None = None) -> Config:
         api_secret = api_secret_raw
         rsa_authentication = False
 
+    dry_run_env = os.getenv("DRY_RUN", "true").strip().lower()
+    dry_run = dry_run_env in ("true", "1", "yes")
+
+    try:
+        spread_percent = float(os.getenv("SPREAD_PERCENT", "1.25").strip())
+    except ValueError:
+        logger.warning("Invalid SPREAD_PERCENT in .env, falling back to 1.25")
+        spread_percent = 1.25
+
+    try:
+        savings_percent = float(os.getenv("SAVINGS_PERCENT", "0.25").strip())
+    except ValueError:
+        logger.warning("Invalid SAVINGS_PERCENT in .env, falling back to 0.25")
+        savings_percent = 0.25
+
     if not api_key:
         logger.warning(f"API key for {'testnet' if testnet else 'mainnet'} is missing or empty in .env file.")
 
@@ -102,4 +120,7 @@ def load_config(use_testnet: bool | None = None) -> Config:
         rsa_authentication=rsa_authentication,
         testnet=testnet,
         categories=categories,
+        dry_run=dry_run,
+        spread_percent=spread_percent,
+        savings_percent=savings_percent,
     )

@@ -1,17 +1,13 @@
 """
 Bybit Reactive Hedge Trading Bot (Fire and Forget)
 Monitors Sell executions on BTCUSDT, aggregates volume (min 6.0 USDT limit),
-and places counter Limit Buy orders on WBTCUSDT with a 5% discount.
+and places counter Limit Buy orders on WBTCUSDT.
 """
-
-# ---------------------------------------------------------
-# Configuration Flags
-# ---------------------------------------------------------
-DRY_RUN = True
 
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
+import math
 from pathlib import Path
 import sqlite3
 import sys
@@ -21,7 +17,7 @@ from logging.handlers import RotatingFileHandler
 
 from pybit.unified_trading import HTTP, WebSocket
 
-from config import load_config
+from config import Config, load_config
 
 # Configure logging (console + rotating log file)
 file_handler = RotatingFileHandler(
@@ -141,17 +137,32 @@ def get_symbol_precision(session: HTTP, symbol: str = "WBTCUSDT") -> tuple[int, 
 trade_lock = threading.Lock()
 
 
-def check_and_trade(db: DatabaseManager, session: HTTP, dry_run: bool = DRY_RUN) -> None:
+def check_and_trade(
+    db: DatabaseManager,
+    session: HTTP,
+    config: Config | None = None,
+    dry_run: bool | None = None,
+    spread_percent: float | None = None,
+    savings_percent: float | None = None,
+) -> None:
     """
     Checks DB for pending executions. If total value >= 6.0 USDT:
     - Calculates weighted average sell price.
-    - Calculates buy_price_wbtc = avg_sell_price * 0.95.
-    - Calculates safe_usdt = total_pending_usdt * 0.99 (1% retained).
+    - Calculates buy_price_wbtc = avg_sell_price * (1 - SPREAD_PERCENT / 100).
+    - Calculates safe_usdt = total_pending_usdt * (1 - SAVINGS_PERCENT / 100).
     - Calculates qty_wbtc = safe_usdt / buy_price_wbtc.
-    - Places limit Buy order on WBTCUSDT (if DRY_RUN is False).
+    - Floors buy_price_wbtc and qty_wbtc to 2 decimal places using math.floor(val * 100) / 100.
+    - Places limit Buy order on WBTCUSDT (if dry_run is False).
     - Updates execution statuses in DB from 'pending' to 'processed'.
     """
     with trade_lock:
+        if config is None:
+            config = load_config()
+
+        is_dry_run = config.dry_run if dry_run is None else dry_run
+        spread_pct = config.spread_percent if spread_percent is None else spread_percent
+        savings_pct = config.savings_percent if savings_percent is None else savings_percent
+
         pending = db.get_pending_executions()
         if not pending:
             return
@@ -171,18 +182,22 @@ def check_and_trade(db: DatabaseManager, session: HTTP, dry_run: bool = DRY_RUN)
             return
 
         avg_sell_price = total_pending_usdt / total_pending_qty
-        buy_price_wbtc = avg_sell_price * 0.95
-        safe_usdt = total_pending_usdt * 0.99
-        qty_wbtc = safe_usdt / buy_price_wbtc
+        raw_buy_price = avg_sell_price * (1.0 - spread_pct / 100.0)
+        safe_usdt = total_pending_usdt * (1.0 - savings_pct / 100.0)
+        raw_qty = safe_usdt / raw_buy_price if raw_buy_price > 0 else 0.0
 
-        price_prec, qty_prec = get_symbol_precision(session, "WBTCUSDT")
-        formatted_price = f"{buy_price_wbtc:.{price_prec}f}"
-        formatted_qty = f"{qty_wbtc:.{qty_prec}f}"
+        # Strict floor rounding to 2 decimal places using math.floor(val * 100) / 100
+        buy_price_wbtc = math.floor(round(raw_buy_price, 8) * 100) / 100.0
+        qty_wbtc = math.floor(round(raw_qty, 8) * 100) / 100.0
 
-        if dry_run:
+        formatted_price = f"{buy_price_wbtc:.2f}"
+        formatted_qty = f"{qty_wbtc:.2f}"
+
+        if is_dry_run:
             logger.info(
                 f"DRY_RUN: Выставил бы ордер Buy WBTCUSDT на сумму {safe_usdt:.2f} USDT "
-                f"по цене {formatted_price} (Qty: {formatted_qty}, Avg Sell Price: {avg_sell_price:.2f})"
+                f"по цене {formatted_price} (Qty: {formatted_qty}, Avg Sell Price: {avg_sell_price:.2f}, "
+                f"Spread: {spread_pct}%, Savings: {savings_pct}%)"
             )
         else:
             try:
@@ -214,7 +229,7 @@ def check_and_trade(db: DatabaseManager, session: HTTP, dry_run: bool = DRY_RUN)
         logger.info(f"Updated status of {len(exec_ids)} execution(s) to 'processed' in DB.")
 
 
-def sync_offline_executions(session: HTTP, db: DatabaseManager) -> None:
+def sync_offline_executions(session: HTTP, db: DatabaseManager, config: Config | None = None) -> None:
     """
     Fetch BTCUSDT execution history for the last 24 hours via REST API before WS connection.
     Filter Sell orders and insert new executions into DB as 'pending'.
@@ -266,10 +281,10 @@ def sync_offline_executions(session: HTTP, db: DatabaseManager) -> None:
             break
 
     logger.info(f"REST sync complete. Inserted {new_count} new pending execution(s).")
-    check_and_trade(db, session)
+    check_and_trade(db, session, config=config)
 
 
-def make_ws_callback(db: DatabaseManager, session: HTTP):
+def make_ws_callback(db: DatabaseManager, session: HTTP, config: Config | None = None):
     def handle_ws_message(msg: dict) -> None:
         try:
             topic = msg.get("topic", "")
@@ -297,7 +312,7 @@ def make_ws_callback(db: DatabaseManager, session: HTTP):
                                 f"(qty={exec_qty}, price={exec_price}, usdt={exec_value:.2f})"
                             )
 
-            check_and_trade(db, session)
+            check_and_trade(db, session, config=config)
         except Exception as e:
             logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
 
@@ -305,12 +320,13 @@ def make_ws_callback(db: DatabaseManager, session: HTTP):
 
 
 async def async_main():
+    config = load_config()
+
     logger.info("=" * 60)
     logger.info("Starting Bybit Reactive Hedge Bot")
-    logger.info(f"DRY_RUN mode: {DRY_RUN}")
+    logger.info(f"DRY_RUN mode: {config.dry_run}")
+    logger.info(f"Spread Percent: {config.spread_percent}% | Savings Percent: {config.savings_percent}%")
     logger.info("=" * 60)
-
-    config = load_config()
 
     if not config.api_key or not config.api_secret or config.api_secret == "your_api_secret_here":
         logger.error("API credentials not properly configured in .env file!")
@@ -330,7 +346,7 @@ async def async_main():
     )
 
     # 1. Offline REST API Sync
-    sync_offline_executions(session, db)
+    sync_offline_executions(session, db, config=config)
 
     # 2. WebSocket Real-time Connection
     logger.info("Connecting to Bybit Private WebSocket execution stream...")
@@ -342,7 +358,7 @@ async def async_main():
         channel_type="private",
     )
 
-    callback = make_ws_callback(db, session)
+    callback = make_ws_callback(db, session, config=config)
     ws.execution_stream(callback=callback)
     logger.info("Subscribed to 'execution' WebSocket stream. Listening for BTCUSDT Sell events...")
 
