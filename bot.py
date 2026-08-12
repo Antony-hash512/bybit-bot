@@ -1,0 +1,361 @@
+"""
+Bybit Reactive Hedge Trading Bot (Fire and Forget)
+Monitors Sell executions on BTCUSDT, aggregates volume (min 6.0 USDT limit),
+and places counter Limit Buy orders on WBTCUSDT with a 5% discount.
+"""
+
+# ---------------------------------------------------------
+# Configuration Flags
+# ---------------------------------------------------------
+DRY_RUN = True
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+import logging
+from pathlib import Path
+import sqlite3
+import sys
+import threading
+
+from pybit.unified_trading import HTTP, WebSocket
+
+from config import load_config
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("bybit_bot.hedge")
+
+
+class DatabaseManager:
+    """SQLite Database Manager for hedge bot execution tracking."""
+
+    def __init__(self, db_path: str = "hedge_bot.db"):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def get_connection(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path)
+
+    def _init_db(self) -> None:
+        with self._lock, self.get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS executions (
+                    exec_id TEXT PRIMARY KEY,
+                    exec_qty REAL NOT NULL,
+                    exec_price REAL NOT NULL,
+                    exec_value_usdt REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            conn.commit()
+
+    def insert_execution(
+        self, exec_id: str, exec_qty: float, exec_price: float, exec_value_usdt: float
+    ) -> bool:
+        """Insert execution with status='pending'. Returns True if inserted, False if duplicate."""
+        with self._lock, self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO executions (exec_id, exec_qty, exec_price, exec_value_usdt, status)
+                VALUES (?, ?, ?, ?, 'pending')
+                """,
+                (exec_id, exec_qty, exec_price, exec_value_usdt),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_pending_executions(self) -> list[dict]:
+        """Fetch all executions with status='pending'."""
+        with self._lock, self.get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT exec_id, exec_qty, exec_price, exec_value_usdt
+                FROM executions
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                """
+            )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_as_processed(self, exec_ids: list[str]) -> None:
+        """Update status to 'processed' for the given list of execution IDs."""
+        if not exec_ids:
+            return
+        with self._lock, self.get_connection() as conn:
+            placeholders = ",".join("?" for _ in exec_ids)
+            conn.execute(
+                f"UPDATE executions SET status = 'processed' WHERE exec_id IN ({placeholders})",
+                exec_ids,
+            )
+            conn.commit()
+
+
+def get_symbol_precision(session: HTTP, symbol: str = "WBTCUSDT") -> tuple[int, int]:
+    """
+    Fetch price and quantity precision for a given spot symbol from Bybit.
+    Returns (price_precision, qty_precision).
+    """
+    try:
+        res = session.get_instruments_info(category="spot", symbol=symbol)
+        if res.get("retCode") == 0 and res.get("result", {}).get("list"):
+            info = res["result"]["list"][0]
+            price_filter = info.get("priceFilter", {})
+            lot_filter = info.get("lotSizeFilter", {})
+
+            tick_size = price_filter.get("tickSize", "0.01")
+            base_precision = lot_filter.get("basePrecision", "0.0001")
+
+            def count_decimals(val_str: str) -> int:
+                if "." in val_str:
+                    return len(val_str.rstrip("0").split(".")[1])
+                return 0
+
+            price_prec = count_decimals(tick_size)
+            qty_prec = count_decimals(base_precision)
+            return price_prec, qty_prec
+    except Exception as e:
+        logger.warning(f"Failed to fetch symbol precision for {symbol}, using fallback (2, 5): {e}")
+
+    return 2, 5
+
+
+trade_lock = threading.Lock()
+
+
+def check_and_trade(db: DatabaseManager, session: HTTP, dry_run: bool = DRY_RUN) -> None:
+    """
+    Checks DB for pending executions. If total value >= 6.0 USDT:
+    - Calculates weighted average sell price.
+    - Calculates buy_price_wbtc = avg_sell_price * 0.95.
+    - Calculates safe_usdt = total_pending_usdt * 0.99 (1% retained).
+    - Calculates qty_wbtc = safe_usdt / buy_price_wbtc.
+    - Places limit Buy order on WBTCUSDT (if DRY_RUN is False).
+    - Updates execution statuses in DB from 'pending' to 'processed'.
+    """
+    with trade_lock:
+        pending = db.get_pending_executions()
+        if not pending:
+            return
+
+        total_pending_usdt = sum(float(x["exec_value_usdt"]) for x in pending)
+
+        if total_pending_usdt < 6.0:
+            logger.info(
+                f"Pending volume: {total_pending_usdt:.2f} USDT (< 6.0 USDT threshold). "
+                f"Accumulated {len(pending)} execution(s). Waiting for more trades."
+            )
+            return
+
+        total_pending_qty = sum(float(x["exec_qty"]) for x in pending)
+        if total_pending_qty <= 0:
+            logger.warning("Invalid total pending quantity <= 0. Skipping trade calculation.")
+            return
+
+        avg_sell_price = total_pending_usdt / total_pending_qty
+        buy_price_wbtc = avg_sell_price * 0.95
+        safe_usdt = total_pending_usdt * 0.99
+        qty_wbtc = safe_usdt / buy_price_wbtc
+
+        price_prec, qty_prec = get_symbol_precision(session, "WBTCUSDT")
+        formatted_price = f"{buy_price_wbtc:.{price_prec}f}"
+        formatted_qty = f"{qty_wbtc:.{qty_prec}f}"
+
+        if dry_run:
+            logger.info(
+                f"DRY_RUN: Выставил бы ордер Buy WBTCUSDT на сумму {safe_usdt:.2f} USDT "
+                f"по цене {formatted_price} (Qty: {formatted_qty}, Avg Sell Price: {avg_sell_price:.2f})"
+            )
+        else:
+            try:
+                resp = session.place_order(
+                    category="spot",
+                    symbol="WBTCUSDT",
+                    side="Buy",
+                    orderType="Limit",
+                    price=formatted_price,
+                    qty=formatted_qty,
+                    timeInForce="GTC",
+                )
+                ret_code = resp.get("retCode", -1)
+                ret_msg = resp.get("retMsg", "")
+                if ret_code == 0:
+                    order_id = resp.get("result", {}).get("orderId", "N/A")
+                    logger.info(
+                        f"ORDER PLACED SUCCESSFULLY [ID: {order_id}]: Buy WBTCUSDT price={formatted_price}, qty={formatted_qty}"
+                    )
+                else:
+                    logger.error(f"Failed to place order: [{ret_code}] {ret_msg}")
+                    return
+            except Exception as e:
+                logger.error(f"Error placing WBTCUSDT order via REST API: {e}")
+                return
+
+        exec_ids = [x["exec_id"] for x in pending]
+        db.mark_as_processed(exec_ids)
+        logger.info(f"Updated status of {len(exec_ids)} execution(s) to 'processed' in DB.")
+
+
+def sync_offline_executions(session: HTTP, db: DatabaseManager) -> None:
+    """
+    Fetch BTCUSDT execution history for the last 24 hours via REST API before WS connection.
+    Filter Sell orders and insert new executions into DB as 'pending'.
+    Triggers check_and_trade afterwards.
+    """
+    logger.info("Starting offline REST execution sync for BTCUSDT (last 24 hours)...")
+    start_time_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
+    cursor = None
+    new_count = 0
+
+    while True:
+        kwargs = {
+            "category": "spot",
+            "symbol": "BTCUSDT",
+            "startTime": start_time_ms,
+            "limit": 100,
+        }
+        if cursor:
+            kwargs["cursor"] = cursor
+
+        try:
+            resp = session.get_executions(**kwargs)
+            ret_code = resp.get("retCode", -1)
+            if ret_code != 0:
+                logger.error(f"REST execution sync error [{ret_code}]: {resp.get('retMsg')}")
+                break
+
+            result = resp.get("result", {})
+            executions = result.get("list", [])
+
+            for item in executions:
+                side = item.get("side", "")
+                if side.lower() == "sell":
+                    exec_id = str(item.get("execId", ""))
+                    exec_qty = float(item.get("execQty", 0.0))
+                    exec_price = float(item.get("execPrice", 0.0))
+                    exec_value = float(item.get("execValue", 0.0)) or (exec_qty * exec_price)
+
+                    if exec_id and exec_qty > 0 and exec_price > 0:
+                        inserted = db.insert_execution(exec_id, exec_qty, exec_price, exec_value)
+                        if inserted:
+                            new_count += 1
+
+            cursor = result.get("nextPageCursor")
+            if not cursor:
+                break
+        except Exception as e:
+            logger.error(f"Failed to fetch execution history during REST sync: {e}")
+            break
+
+    logger.info(f"REST sync complete. Inserted {new_count} new pending execution(s).")
+    check_and_trade(db, session)
+
+
+def make_ws_callback(db: DatabaseManager, session: HTTP):
+    def handle_ws_message(msg: dict) -> None:
+        try:
+            topic = msg.get("topic", "")
+            if topic != "execution":
+                return
+
+            data = msg.get("data", [])
+            if not isinstance(data, list):
+                data = [data]
+
+            for item in data:
+                symbol = item.get("symbol", "")
+                side = item.get("side", "")
+                if symbol == "BTCUSDT" and side.lower() == "sell":
+                    exec_id = str(item.get("execId", ""))
+                    exec_qty = float(item.get("execQty", 0.0))
+                    exec_price = float(item.get("execPrice", 0.0))
+                    exec_value = float(item.get("execValue", 0.0)) or (exec_qty * exec_price)
+
+                    if exec_id and exec_qty > 0 and exec_price > 0:
+                        inserted = db.insert_execution(exec_id, exec_qty, exec_price, exec_value)
+                        if inserted:
+                            logger.info(
+                                f"WS Event: Captured BTCUSDT Sell Execution {exec_id} "
+                                f"(qty={exec_qty}, price={exec_price}, usdt={exec_value:.2f})"
+                            )
+
+            check_and_trade(db, session)
+        except Exception as e:
+            logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
+
+    return handle_ws_message
+
+
+async def async_main():
+    logger.info("=" * 60)
+    logger.info("Starting Bybit Reactive Hedge Bot")
+    logger.info(f"DRY_RUN mode: {DRY_RUN}")
+    logger.info("=" * 60)
+
+    config = load_config()
+
+    if not config.api_key or not config.api_secret or config.api_secret == "your_api_secret_here":
+        logger.error("API credentials not properly configured in .env file!")
+        sys.exit(1)
+
+    logger.info(f"Operating Mode: {'TESTNET' if config.testnet else 'MAINNET'}")
+
+    db = DatabaseManager("hedge_bot.db")
+
+    session = HTTP(
+        testnet=config.testnet,
+        api_key=config.api_key,
+        api_secret=config.api_secret,
+        rsa_authentication=config.rsa_authentication,
+    )
+
+    # 1. Offline REST API Sync
+    sync_offline_executions(session, db)
+
+    # 2. WebSocket Real-time Connection
+    logger.info("Connecting to Bybit Private WebSocket execution stream...")
+    ws = WebSocket(
+        testnet=config.testnet,
+        api_key=config.api_key,
+        api_secret=config.api_secret,
+        rsa_authentication=config.rsa_authentication,
+        channel_type="private",
+    )
+
+    callback = make_ws_callback(db, session)
+    ws.execution_stream(callback=callback)
+    logger.info("Subscribed to 'execution' WebSocket stream. Listening for BTCUSDT Sell events...")
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Shutdown signal received. Stopping bot...")
+    finally:
+        try:
+            ws.exit()
+            logger.info("WebSocket connection closed cleanly.")
+        except Exception as e:
+            logger.warning(f"Error closing WebSocket: {e}")
+
+
+def main():
+    try:
+        asyncio.run(async_main())
+    except KeyboardInterrupt:
+        logger.info("Bot exited.")
+
+
+if __name__ == "__main__":
+    main()

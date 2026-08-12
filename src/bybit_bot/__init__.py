@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from bybit-bot!")
+from bot import main
+
+__all__ = ["main"]
