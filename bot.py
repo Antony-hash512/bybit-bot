@@ -193,36 +193,92 @@ def check_and_trade(
         formatted_price = f"{buy_price_wbtc:.1f}"
         formatted_qty = f"{qty_wbtc:.5f}"
 
-        if is_dry_run:
-            logger.info(
-                f"DRY_RUN: Выставил бы ордер Buy WBTCUSDT на сумму {safe_usdt:.2f} USDT "
-                f"по цене {formatted_price} (Qty: {formatted_qty}, Avg Sell Price: {avg_sell_price:.2f}, "
-                f"Spread: {spread_pct}%, Savings: {savings_pct}%)"
-            )
-        else:
+        # Check for existing open Buy order at the exact same price (to 1 decimal place)
+        existing_order = None
+        try:
+            open_orders_resp = session.get_open_orders(category="spot", symbol="WBTCUSDT")
+            if open_orders_resp.get("retCode") == 0:
+                orders_list = open_orders_resp.get("result", {}).get("list", [])
+                for ord_item in orders_list:
+                    ord_side = ord_item.get("side", "").lower()
+                    if ord_side == "buy":
+                        try:
+                            ord_price = float(ord_item.get("price", 0))
+                            ord_price_floored = math.floor(round(ord_price, 8) * 10) / 10.0
+                            if ord_price_floored == buy_price_wbtc:
+                                existing_order = ord_item
+                                break
+                        except (ValueError, TypeError):
+                            continue
+        except Exception as e:
+            logger.warning(f"Could not fetch open orders for WBTCUSDT: {e}")
+
+        if existing_order:
+            order_id = existing_order.get("orderId", "N/A")
             try:
-                resp = session.place_order(
-                    category="spot",
-                    symbol="WBTCUSDT",
-                    side="Buy",
-                    orderType="Limit",
-                    price=formatted_price,
-                    qty=formatted_qty,
-                    timeInForce="GTC",
+                curr_qty = float(existing_order.get("qty", 0.0))
+            except (ValueError, TypeError):
+                curr_qty = 0.0
+
+            raw_new_qty = curr_qty + qty_wbtc
+            new_qty = math.floor(round(raw_new_qty, 8) * 100000) / 100000.0
+            formatted_new_qty = f"{new_qty:.5f}"
+
+            if is_dry_run:
+                logger.info(
+                    f"DRY_RUN: Увеличил бы объем существующего ордера [{order_id}] с {curr_qty:.5f} до {formatted_new_qty} по цене {formatted_price}"
                 )
-                ret_code = resp.get("retCode", -1)
-                ret_msg = resp.get("retMsg", "")
-                if ret_code == 0:
-                    order_id = resp.get("result", {}).get("orderId", "N/A")
-                    logger.info(
-                        f"ORDER PLACED SUCCESSFULLY [ID: {order_id}]: Buy WBTCUSDT price={formatted_price}, qty={formatted_qty}"
+            else:
+                try:
+                    resp = session.amend_order(
+                        category="spot",
+                        symbol="WBTCUSDT",
+                        orderId=order_id,
+                        qty=formatted_new_qty,
                     )
-                else:
-                    logger.error(f"Failed to place order: [{ret_code}] {ret_msg}")
+                    ret_code = resp.get("retCode", -1)
+                    ret_msg = resp.get("retMsg", "")
+                    if ret_code == 0:
+                        logger.info(
+                            f"Увеличил объем существующего ордера [{order_id}] до [{formatted_new_qty}] по цене {formatted_price}"
+                        )
+                    else:
+                        logger.error(f"Failed to amend order [{order_id}]: [{ret_code}] {ret_msg}")
+                        return
+                except Exception as e:
+                    logger.error(f"Error amending WBTCUSDT order [{order_id}] via REST API: {e}")
                     return
-            except Exception as e:
-                logger.error(f"Error placing WBTCUSDT order via REST API: {e}")
-                return
+        else:
+            if is_dry_run:
+                logger.info(
+                    f"DRY_RUN: Выставил бы ордер Buy WBTCUSDT на сумму {safe_usdt:.2f} USDT "
+                    f"по цене {formatted_price} (Qty: {formatted_qty}, Avg Sell Price: {avg_sell_price:.2f}, "
+                    f"Spread: {spread_pct}%, Savings: {savings_pct}%)"
+                )
+            else:
+                try:
+                    resp = session.place_order(
+                        category="spot",
+                        symbol="WBTCUSDT",
+                        side="Buy",
+                        orderType="Limit",
+                        price=formatted_price,
+                        qty=formatted_qty,
+                        timeInForce="GTC",
+                    )
+                    ret_code = resp.get("retCode", -1)
+                    ret_msg = resp.get("retMsg", "")
+                    if ret_code == 0:
+                        order_id = resp.get("result", {}).get("orderId", "N/A")
+                        logger.info(
+                            f"ORDER PLACED SUCCESSFULLY [ID: {order_id}]: Buy WBTCUSDT price={formatted_price}, qty={formatted_qty}"
+                        )
+                    else:
+                        logger.error(f"Failed to place order: [{ret_code}] {ret_msg}")
+                        return
+                except Exception as e:
+                    logger.error(f"Error placing WBTCUSDT order via REST API: {e}")
+                    return
 
         exec_ids = [x["exec_id"] for x in pending]
         db.mark_as_processed(exec_ids)

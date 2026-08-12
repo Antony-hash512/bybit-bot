@@ -113,9 +113,52 @@ def test_check_and_trade_real_order():
     cleanup()
 
 
+def test_check_and_trade_amend_existing_order():
+    cleanup()
+    db = DatabaseManager(TEST_DB)
+    # Exec: 0.1 BTC @ 50,000 = 5000.0 USDT
+    # buy_price_wbtc = 49,375.0, qty_wbtc = 0.10101
+    db.insert_execution("exec_amend", 0.1, 50000.0, 5000.0)
+
+    mock_session = MagicMock()
+    # Mock open order at price 49375.0 with existing qty 0.20000
+    mock_session.get_open_orders.return_value = {
+        "retCode": 0,
+        "result": {
+            "list": [
+                {
+                    "orderId": "existing_ord_999",
+                    "side": "Buy",
+                    "price": "49375.00",
+                    "qty": "0.20000"
+                }
+            ]
+        }
+    }
+    mock_session.amend_order.return_value = {"retCode": 0, "result": {"orderId": "existing_ord_999"}}
+
+    check_and_trade(db, mock_session, dry_run=False, spread_percent=1.25, savings_percent=0.25)
+
+    # Should call amend_order instead of place_order
+    mock_session.place_order.assert_not_called()
+    mock_session.amend_order.assert_called_once()
+    kwargs = mock_session.amend_order.call_args[1]
+    assert kwargs["category"] == "spot"
+    assert kwargs["symbol"] == "WBTCUSDT"
+    assert kwargs["orderId"] == "existing_ord_999"
+    # new_qty = 0.20000 + 0.10101 = 0.30101
+    assert kwargs["qty"] == "0.30101"
+
+    # Status updated in DB
+    pending = db.get_pending_executions()
+    assert len(pending) == 0
+    cleanup()
+
+
 if __name__ == "__main__":
     test_db_manager()
     test_check_and_trade_below_threshold()
     test_check_and_trade_above_threshold_dry_run()
     test_check_and_trade_real_order()
+    test_check_and_trade_amend_existing_order()
     print("ALL TESTS PASSED SUCCESSFULLY!")
