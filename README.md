@@ -97,9 +97,213 @@ uv run python viewer.py --category linear --settle-coin USDT
 
 ---
 
+---
+
+## 🤖 Реактивный хедж-бот (`bot.py`)
+
+Торговый daemon-бот с логикой **Fire and Forget**:
+- **Мониторинг**: Отслеживает все исполнения (даже частичные) ордеров на **ПРОДАЖУ (Sell)** по `BTCUSDT`.
+- **Накопление**: Накапливает суммы сделок в SQLite БД (`hedge_bot.db`), пока общая сумма pending-сделок не достигнет лимита **>= 6.0 USDT**.
+- **Встречный ордер**: Рассчитывает средневзвешенную цену продажи, делает скидку **5%** (`buy_price_wbtc = avg_sell_price * 0.95`), удерживает **1%** в USDT для покрытия комиссий и доходности (`safe_usdt = total_usdt * 0.99`), вычисляет количество WBTC с учетом точности биржи и выставляет лимитный ордер **BUY** на `WBTCUSDT`.
+- **Восстановление**: При запуске синхронизирует историю сделок за 24 часа через REST API до подписки на WebSocket.
+
+---
+
+## 🐧 Развертывание и запуск на чистом сервере Arch Linux
+
+Подробное руководство по настройке и запуску бота на новом сервере с **Arch Linux**.
+
+### 1. Подготовка системы и установка пакетов
+
+Обновите систему и установите необходимый базовый инструментарий:
+
+```bash
+# Обновление базы пакетов и системы
+sudo pacman -Syu
+
+# Установка Git, Python, SQLite и необходимых утилит
+sudo pacman -S git python sqlite base-devel
+```
+
+> 💡 Установите менеджер пакетов `uv` (официальный рекомендованный способ):
+> ```bash
+> curl -LsSf https://astral.sh/uv/install.sh | sh
+> source ~/.bashrc
+> ```
+
+### 2. Клонирование и настройка проекта
+
+```bash
+# Клонирование репозитория
+git clone https://github.com/Antony-hash512/bybit-bot.git
+cd bybit-bot
+
+# Синхронизация зависимостей (pybit, python-dotenv, rich, pycryptodome)
+uv sync
+```
+
+### 3. Конфигурация ключей авторизации
+
+Создайте или отредактируйте файл `.env`:
+
+```bash
+nano .env
+```
+
+Пример содержания `.env`:
+
+```env
+# Переключатель режимов (True - Testnet / False - Mainnet)
+USE_TESTNET=True
+
+# Ключи для реальной биржи (Mainnet)
+BYBIT_API_KEY=ваш_mainnet_api_key
+BYBIT_BOT_NAME=bot_mainnet
+BYBIT_PRIVATE_KEY_PATH=private.pem
+
+# Ключи для тестовой биржи (Testnet)
+BYBIT_TESTNET_API_KEY=ваш_testnet_api_key
+BYBIT_TESTNET_BOT_NAME=bot_testnet
+BYBIT_TESTNET_PRIVATE_KEY_PATH=private_testnet.pem
+```
+
+Если вы используете **RSA PEM-ключи**:
+Положите файл ключа `private_testnet.pem` (для теста) или `private.pem` (для боевого режима) в корень проекта и ограничьте права доступа:
+```bash
+chmod 600 private*.pem
+```
+
+---
+
+### 🧪 4. Тестирование в Testnet
+
+Для безопасной проверки работы бота без риска реальными средствами используйте режим **Testnet** + **DRY_RUN**.
+
+#### Этап 4.1: Безопасный прогон (Симуляция без отправки ордеров)
+1. В `.env` установите: `USE_TESTNET=True`.
+2. В файле `bot.py` убедитесь, что включен симуляционный режим:
+   ```python
+   DRY_RUN = True
+   ```
+3. Запустите бота:
+   ```bash
+   uv run python bot.py
+   ```
+4. **Что происходит**:
+   - Бот считывает историю сделок за 24 часа через REST API.
+   - Подключается к приватной сокет-сессии Testnet.
+   - При накоплении сделок >= 6.0 USDT выводит в консоль красивый лог симуляции:
+     `DRY_RUN: Выставил бы ордер Buy WBTCUSDT на сумму X по цене Y (Qty: Z)`
+   - Обновляет статусы в SQLite БД `hedge_bot.db`.
+
+#### Этап 4.2: Тестирование с реальным ордером в Testnet
+1. Откройте `bot.py` и установите:
+   ```python
+   DRY_RUN = False
+   ```
+2. Запустите бота: `uv run python bot.py`.
+3. Совершите продажу BTC на тестовом сайте [testnet.bybit.com](https://testnet.bybit.com).
+4. Убедитесь в консоли и на сайте Bybit Testnet, что выставлен реальный лимитный ордер на покупку `WBTCUSDT`.
+
+---
+
+### ⚡ 5. Запуск в "боевых условиях" (Mainnet / Реальная биржа)
+
+Перед запуском на реальном счете переключите конфигурацию:
+
+1. **Конфигурация `.env`**:
+   ```env
+   USE_TESTNET=False
+   ```
+2. **Флаг в `bot.py`**:
+   ```python
+   DRY_RUN = False
+   ```
+
+#### Способ А: Запуск как фоновая служба Systemd (Рекомендуется для 24/7 работы)
+
+Создайте файл службы systemd:
+
+```bash
+sudo nano /etc/systemd/system/bybit-hedge-bot.service
+```
+
+Вставьте следующую конфигурацию (замените `username` и путь на ваши):
+
+```ini
+[Unit]
+Description=Bybit Reactive Hedge Trading Bot
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=username
+WorkingDirectory=/home/username/bybit-bot
+ExecStart=/home/username/.local/bin/uv run python bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Перезагрузите демон systemd и запустите сервис:
+
+```bash
+# Перезагрузить конфигурацию systemd
+sudo systemctl daemon-reload
+
+# Включить автозапуск при старте сервера и запустить службу прямо сейчас
+sudo systemctl enable --now bybit-hedge-bot
+
+# Проверить статус работы бота
+sudo systemctl status bybit-hedge-bot
+
+# Просмотр логов бота в реальном времени
+journalctl -u bybit-hedge-bot -f
+```
+
+#### Способ Б: Запуск в сессии `tmux` / `screen`
+
+```bash
+# Создание новой сессии tmux
+tmux new -s hedge-bot
+
+# Запуск бота
+uv run python bot.py
+
+# Для выхода из сессии с сохранением работы нажмите: Ctrl+B, затем D
+# Для повторного подключения к сессии:
+tmux attach -t hedge-bot
+```
+
+---
+
+### 📊 6. Мониторинг и проверка SQLite базы данных
+
+Вы можете параллельно проверять состояние открытых ордеров и историю обработанных сделок:
+
+```bash
+# Мониторинг ордеров на бирже через viewer.py
+uv run python viewer.py --watch --interval 3
+
+# Проверка последних 10 записей в локальной базе данных SQLite
+sqlite3 hedge_bot.db "SELECT exec_id, exec_qty, exec_price, exec_value_usdt, status, created_at FROM executions ORDER BY created_at DESC LIMIT 10;"
+```
+
+---
+
 ## 🧪 Запуск юнит-тестов
 
-Проверка корректности расчетов прогресса и формирования таблиц:
+Проверка работы утилит просмотра и торговой математики хедж-бота:
+
 ```bash
+# Тесты viewer.py
 uv run python test_viewer.py
+
+# Тесты hedge-бота (БД, математика 5% скидки, 1% буфера, DRY_RUN)
+uv run python test_hedge_bot.py
 ```
