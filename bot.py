@@ -17,15 +17,22 @@ import sqlite3
 import sys
 import threading
 
+from logging.handlers import RotatingFileHandler
+
 from pybit.unified_trading import HTTP, WebSocket
 
 from config import load_config
 
-# Configure logging
+# Configure logging (console + rotating log file)
+file_handler = RotatingFileHandler(
+    "bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+stream_handler = logging.StreamHandler(sys.stdout)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[stream_handler, file_handler],
 )
 logger = logging.getLogger("bybit_bot.hedge")
 

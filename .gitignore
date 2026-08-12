@@ -6,3 +6,4 @@ private.pem
 __pycache__/
 *.pyc
 .venv/
+bot.log
