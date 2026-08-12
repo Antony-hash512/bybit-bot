@@ -186,12 +186,12 @@ def check_and_trade(
         safe_usdt = total_pending_usdt * (1.0 - savings_pct / 100.0)
         raw_qty = safe_usdt / raw_buy_price if raw_buy_price > 0 else 0.0
 
-        # Strict floor rounding: price (1 decimal: math.floor(val * 10) / 10), qty (6 decimals: math.floor(val * 1000000) / 1000000)
+        # Strict floor rounding: price (1 decimal: math.floor(val * 10) / 10), qty (5 decimals: math.floor(val * 100000) / 100000)
         buy_price_wbtc = math.floor(round(raw_buy_price, 8) * 10) / 10.0
-        qty_wbtc = math.floor(round(raw_qty, 8) * 1000000) / 1000000.0
+        qty_wbtc = math.floor(round(raw_qty, 8) * 100000) / 100000.0
 
         formatted_price = f"{buy_price_wbtc:.1f}"
-        formatted_qty = f"{qty_wbtc:.6f}"
+        formatted_qty = f"{qty_wbtc:.5f}"
 
         if is_dry_run:
             logger.info(
